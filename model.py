@@ -1,94 +1,363 @@
-# 12/07/2021
-# Model architectures
+# 12/10/2021
+# Encoder network for FastGAN inversion,
+# based heavily on https://github.com/genforce/idinvert_pytorch/blob/master/models/stylegan_encoder_network.py
+
+import numpy as np
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-import math
+# Resolutions allowed.
+_RESOLUTIONS_ALLOWED = [8, 16, 32, 64, 128, 256, 512, 1024]
 
-class EfficientHead(nn.Module):
+# Initial resolution.
+_INIT_RES = 4
+
+
+class FastGANEncoder(nn.Module):
+    """The encoder takes images with `RGB` color channels and range [-1, 1]
+  as inputs, and encode the input images to z space of the GAN.
+  """
+
+    def __init__(
+        self,
+        resolution,
+        z_space_dim=256,
+        num_blocks=1,
+        image_channels=3,
+        encoder_channels_base=64,
+        encoder_channels_max=1024,
+        use_wscale=False,
+        use_bn=False,
+    ):
+        """Initializes the encoder with basic settings.
+    Args:
+      resolution: The resolution of the input image.
+      z_space_dim: The dimension of the disentangled latent vector z.
+        (default: 256)
+      num_blocks: Number of convolutional blocks to be used. (default: 1)
+      image_channels: Number of channels of the input image. (default: 3)
+      encoder_channels_base: Base factor of the number of channels used in
+        residual blocks of encoder. (default: 64)
+      encoder_channels_max: Maximum number of channels used in residual blocks
+        of encoder. (default: 1024)
+      use_wscale: Whether to use `wscale` layer. (default: False)
+      use_bn: Whether to use batch normalization layer. (default: False)
+    Raises:
+      ValueError: If the input `resolution` is not supported.
     """
-    Efficient Head as inspired by the simple latent interpolation
-    model proposed by Wei et al.
+        super().__init__()
 
-    Params:
-        cs (int): Size of the number of channels taken into the pooling layer
-        ps (int): Size of the output of the pooling layer
-        n (int): Number of vectors of size 512 to output 
+        if resolution not in _RESOLUTIONS_ALLOWED:
+            raise ValueError(
+                f"Invalid resolution: {resolution}!\n"
+                f"Resolutions allowed: {_RESOLUTIONS_ALLOWED}."
+            )
+
+        self.init_res = _INIT_RES
+        self.resolution = resolution
+        self.z_space_dim = z_space_dim
+        self.num_blocks = num_blocks
+        self.image_channels = image_channels
+        self.encoder_channels_base = encoder_channels_base
+        self.encoder_channels_max = encoder_channels_max
+        self.use_wscale = use_wscale
+        self.use_bn = use_bn
+
+        in_channels = self.image_channels
+        out_channels = self.encoder_channels_base
+
+        blocks = []
+        for block_idx in range(self.num_blocks):
+            if block_idx == 0:
+                blocks.append(
+                    FirstBlock(
+                        in_channels=in_channels,
+                        out_channels=out_channels,
+                        use_wscale=self.use_wscale,
+                        use_bn=self.use_bn,
+                    ))
+
+            elif block_idx == self.num_blocks - 1:
+                in_channels = in_channels * self.init_res * self.init_res
+                out_channels = self.z_space_dim * 2 * block_idx
+                blocks.append(
+                    LastBlock(
+                        in_channels=in_channels,
+                        out_channels=out_channels,
+                        use_wscale=True,
+                        use_bn=self.use_bn,
+                    )
+                )
+
+            else:
+                blocks.append(
+                    ResBlock(
+                        in_channels=in_channels,
+                        out_channels=out_channels,
+                        use_wscale=self.use_wscale,
+                        use_bn=self.use_bn,
+                    )
+                )
+            in_channels = out_channels
+            out_channels = min(out_channels * 2, self.encoder_channels_max)
+
+        self.downsample = AveragePoolingLayer()
+
+    def forward(self, x):
+        if x.ndim != 4 or x.shape[1:] != (
+            self.image_channels,
+            self.resolution,
+            self.resolution,
+        ):
+            raise ValueError(
+                f"The input image should be with shape [batch_size, "
+                f"channel, height, width], where "
+                f"`channel` equals to {self.image_channels}, "
+                f"`height` and `width` equal to {self.resolution}!\n"
+                f"But {x.shape} is received!"
+            )
+
+        for block_idx in range(self.num_blocks):
+            if 0 < block_idx < self.num_blocks - 1:
+                x = self.downsample(x)
+            x = self.__getattr__(f"block{block_idx}")(x)
+        return x
+
+
+class AveragePoolingLayer(nn.Module):
+    """Implements the average pooling layer.
+  Basically, this layer can be used to downsample feature maps from spatial
+  domain.
+  """
+
+    def __init__(self, scale_factor=2):
+        super().__init__()
+        self.scale_factor = scale_factor
+
+    def forward(self, x):
+        ksize = [self.scale_factor, self.scale_factor]
+        strides = [self.scale_factor, self.scale_factor]
+        return F.avg_pool2d(x, kernel_size=ksize, stride=strides, padding=0)
+
+
+class BatchNormLayer(nn.Module):
+    """Implements batch normalization layer."""
+
+    def __init__(self, channels, gamma=False, beta=True, decay=0.9, epsilon=1e-5):
+        """Initializes with basic settings.
+    Args:
+      channels: Number of channels of the input tensor.
+      gamma: Whether the scale (weight) of the affine mapping is learnable.
+      beta: Whether the center (bias) of the affine mapping is learnable.
+      decay: Decay factor for moving average operations in this layer.
+      epsilon: A value added to the denominator for numerical stability.
     """
+        super().__init__()
+        self.bn = nn.BatchNorm2d(
+            num_features=channels,
+            affine=True,
+            track_running_stats=True,
+            momentum=1 - decay,
+            eps=epsilon,
+        )
+        self.bn.weight.requires_grad = gamma
+        self.bn.bias.requires_grad = beta
 
-    def __init__(self, cs: int, ps: int, n: int):
-        """
-        Params:
-            cs (int): Size of the number of channels taken into the pooling layer
-            ps (int): Size of the output of the pooling layer
-            n (int): Number of vectors of size 512 to output 
-        """
-        self.n = n
-        self.pool = nn.AdaptiveAvgPool2d(ps);
-        self.fc = nn.Linear(7 * 7 * cs, n * 512)
+    def forward(self, x):
+        return self.bn(x)
 
-    def forward(self, batch):
-        batch = self.pool(batch)
-        batch = torch.flatten(batch)
-        batch = self.fc(batch)
-        return torch.reshape(batch, self.n * 512)
 
-class Interpolator(nn.Module):
+class WScaleLayer(nn.Module):
+    """Implements the layer to scale weight variable and add bias.
+  NOTE: The weight variable is trained in `nn.Conv2d` layer (or `nn.Linear`
+  layer), and only scaled with a constant number, which is not trainable in
+  this layer. However, the bias variable is trainable in this layer.
+  """
+
+    def __init__(self, in_channels, out_channels, kernel_size, gain=np.sqrt(2.0)):
+        super().__init__()
+        fan_in = in_channels * kernel_size * kernel_size
+        self.scale = gain / np.sqrt(fan_in)
+        self.bias = nn.Parameter(torch.zeros(out_channels))
+
+    def forward(self, x):
+        if x.ndim == 4:
+            return x * self.scale + self.bias.view(1, -1, 1, 1)
+        if x.ndim == 2:
+            return x * self.scale + self.bias.view(1, -1)
+        raise ValueError(
+            f"The input tensor should be with shape [batch_size, "
+            f"channel, height, width], or [batch_size, channel]!\n"
+            f"But {x.shape} is received!"
+        )
+
+
+class FirstBlock(nn.Module):
+    """Implements the first block, which is a convolutional block."""
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        use_wscale=False,
+        wscale_gain=np.sqrt(2.0),
+        use_bn=False,
+        activation_type="lrelu",
+    ):
+        super().__init__()
+
+        self.conv = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+        )
+        self.scale = wscale_gain / np.sqrt(in_channels * 3 * 3) if use_wscale else 1.0
+        self.bn = BatchNormLayer(channels=out_channels) if use_bn else nn.Identity()
+
+        if activation_type == "linear":
+            self.activate = nn.Identity()
+        elif activation_type == "lrelu":
+            self.activate = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+        else:
+            raise NotImplementedError(
+                f"Not implemented activation function: " f"{activation_type}!"
+            )
+
+    def forward(self, x):
+        return self.activate(self.bn(self.conv(x) * self.scale))
+
+
+class ResBlock(nn.Module):
+    """Implements the residual block.
+  Usually, each residual block contains two convolutional layers, each of which
+  is followed by batch normalization layer and activation layer.
+  """
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        use_wscale=False,
+        wscale_gain=np.sqrt(2.0),
+        use_bn=False,
+        activation_type="lrelu",
+    ):
+        """Initializes the class with block settings.
+    Args:
+      in_channels: Number of channels of the input tensor fed into this block.
+      out_channels: Number of channels of the output tensor.
+      kernel_size: Size of the convolutional kernels.
+      stride: Stride parameter for convolution operation.
+      padding: Padding parameter for convolution operation.
+      use_wscale: Whether to use `wscale` layer.
+      wscale_gain: The gain factor for `wscale` layer.
+      use_bn: Whether to use batch normalization layer.
+      activation_type: Type of activation. Support `linear` and `lrelu`.
+    Raises:
+      NotImplementedError: If the input `activation_type` is not supported.
     """
-    Interpolator as inspired by the simple latent interpolation 
-    model proposed by Wei et al.
+        super().__init__()
 
-    Params:
-        n1 (int): Number of feature vectors to extract from the first downsample
-        and efficient head
-        n2 (int): Number of feature vectors to extract from the second downsample
-        and efficient head
-        n3 (int): Number of feature vectors to extract from the third downsample
-        and efficient head
-        s (int = 256): Shape of the image (s x s)
-    """
-    def __init__(self, n1: int, n2: int, n3: int, s: int = 256):
-        """
-        Params:
-            n1 (int): Number of feature vectors to extract from the first downsample
-            and efficient head
-            n2 (int): Number of feature vectors to extract from the second downsample
-            and efficient head
-            n3 (int): Number of feature vectors to extract from the third downsample
-            and efficient head
-            s (int = 256): Shape of the image (s x s)
-        """
-        assert math.ceil(math.log2(s)) == math.floor(math.log2(s)), "Image size must be a power of two"
+        # Add shortcut if needed.
+        if in_channels != out_channels:
+            self.add_shortcut = True
+            self.conv = nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=1,
+                stride=1,
+                padding=0,
+                bias=False,
+            )
+            self.scale = wscale_gain / np.sqrt(in_channels) if use_wscale else 1.0
+            self.bn = BatchNormLayer(channels=out_channels) if use_bn else nn.Identity()
+        else:
+            self.add_shortcut = False
+            self.identity = nn.Identity()
 
-        NUM_WPLUS = int(math.log2(s)) * 2 - 2
-        assert n1 + n2 + n3 == NUM_WPLUS, f"Latent vectors must add up to size {NUM_WPLUS} x 512"
+        hidden_channels = min(in_channels, out_channels)
 
-        self.conv1 = nn.Conv2d(3, 16, 4, 2, 1)
-        self.conv2 = nn.Conv2d(16, 32, 4, 2, 1)
-        self.conv3 = nn.Conv2d(32, 48, 4, 2, 1)
-        self.act = nn.ReLU()
+        # First convolutional block.
+        self.conv1 = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=hidden_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+        )
+        self.scale1 = 1.0 if use_wscale else wscale_gain / np.sqrt(in_channels * 3 * 3)
+        # NOTE: WScaleLayer is employed to add bias.
+        self.wscale1 = WScaleLayer(
+            in_channels=in_channels,
+            out_channels=hidden_channels,
+            kernel_size=3,
+            gain=wscale_gain,
+        )
+        self.bn1 = BatchNormLayer(channels=hidden_channels) if use_bn else nn.Identity()
 
-        self.efficient1 = EfficientHead(16, 7, n1)
-        self.efficient2 = EfficientHead(16, 7, n1)
-        self.efficient3 = EfficientHead(16, 7, n1)
+        # Second convolutional block.
+        self.conv2 = nn.Conv2d(
+            in_channels=hidden_channels,
+            out_channels=out_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+        )
+        self.scale2 = (
+            1.0 if use_wscale else wscale_gain / np.sqrt(hidden_channels * 3 * 3)
+        )
+        self.wscale2 = WScaleLayer(
+            in_channels=hidden_channels,
+            out_channels=out_channels,
+            kernel_size=3,
+            gain=wscale_gain,
+        )
+        self.bn2 = BatchNormLayer(channels=out_channels) if use_bn else nn.Identity()
 
-    def forward(self, batch):
-        """
-        In this case, w1, w2 and w3 refer to the three batches of w+
-        vectors outputted by the efficient heads as opposed to the
-        conventional notation for the position in the w+ matrix.
-        """
-        batch = self.act(self.conv1(batch))
-        w1 = self.efficient1(batch) 
+        if activation_type == "linear":
+            self.activate = nn.Identity()
+        elif activation_type == "lrelu":
+            self.activate = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+        else:
+            raise NotImplementedError(
+                f"Not implemented activation function: " f"{activation_type}!"
+            )
 
-        batch = self.act(self.conv2(batch))
-        w2 = self.efficient2(batch) 
+    def forward(self, x):
+        if self.add_shortcut:
+            y = self.activate(self.bn(self.conv(x) * self.scale))
+        else:
+            y = self.identity(x)
+        x = self.activate(self.bn1(self.wscale1(self.conv1(x) / self.scale1)))
+        x = self.activate(self.bn2(self.wscale2(self.conv2(x) / self.scale2)))
+        return x + y
 
-        batch = self.act(self.conv3(batch))
-        w3 = self.efficient3(batch) 
 
-        return torch.cat([w1, w2, w3])
+class Head(nn.Module):
+    """Implements the last block, which is an adaptive average pooling blockk followed
+    by a dense block."""
 
-if __name__ == "__main__":
-    # TODO: Test the network outputs 
+    def __init__(
+        self, in_channels, out_channels, use_wscale=False, wscale_gain=1.0
+    ):
+        super().__init__()
+
+        self.pool = nn.AdaptiveAvgPool2d((7,7))
+        self.fc = nn.Linear(
+            in_features=in_channels * 49, out_features=out_channels, bias=False
+        )
+        self.scale = wscale_gain / np.sqrt(in_channels) if use_wscale else 1.0
+
+    def forward(self, x):
+        x = self.pool(x)
+        x = x.view(x.shape[0], -1)
+        x = self.fc(x) * self.scale
+        x = x.view(x.shape[0], x.shape[1], 1, 1)
+        return self.bn(x).view(x.shape[0], x.shape[1])
