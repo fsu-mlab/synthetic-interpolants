@@ -22,8 +22,8 @@ class EncoderLoss(nn.Module):
         self.lpips.eval()
 
         # Lambda values from the paper
-        self.lmbda_adv = 1e-1
-        self.lmbda_lpips = 5e-5
+        self.lmbda_adv = 1.
+        self.lmbda_lpips = 1.
 
     def forward(self, inpt: torch.Tensor, target: torch.Tensor, disc: torch.Tensor):
         # Disc represents the discriminator loss

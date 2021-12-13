@@ -11,7 +11,7 @@ from torch.cuda.amp import autocast
 from torch.utils.tensorboard import SummaryWriter
 
 import torchvision
-from torchvision.datasets import ImageFolder
+from torchvision.datasets import DatasetFolder
 import torchvision.transforms as transforms
 from torchvision.utils import make_grid
 
@@ -22,6 +22,22 @@ import os
 import click
 import dnnlib
 import legacy
+from PIL import Image
+
+def loader(path):
+    img = Image.open(path).convert('RGB')
+    return img
+
+class Dataset(DatasetFolder):
+    """
+    Simple dataset for loading in numerical directory images properly
+    """
+    def __init__(self, root: str, loader: callable, transform=None):
+        super().__init__(root, loader=loader, transform=transform, extensions=('png', 'jpg'))
+    
+    def find_classes(self, path):
+        folders = [p for p in os.listdir(path) if os.path.isdir(f'{path}/{p}')]
+        return (folders, {f: int(f) for f in folders})
 
 @click.command()
 
@@ -69,7 +85,7 @@ def search(**kwargs):
     # Calculate number of steps to accumulate gradient 
     accumulate_steps = (opts['batch'] // opts['batch_gpu']) if opts.get('batch_gpu') else 1
 
-    dataset = ImageFolder(opts['data'], transform=tsfms, target_transform=lambda x: F.one_hot(torch.tensor(x, dtype=torch.int64), num_classes).float())
+    dataset = Dataset(opts['data'], loader, transform=tsfms)
     dataloader = DataLoader(
         dataset, 
         shuffle=True, 
@@ -112,13 +128,14 @@ def search(**kwargs):
 
         for i, (imgs, labels) in enumerate(dataloader, 0):
             with autocast():
-                imgs, labels = imgs.cuda(), labels.cuda()
+                imgs = imgs.cuda()
 
                 # Encode the batch
                 z_pred = E(imgs)
+                labels = F.one_hot(torch.tensor(labels), num_classes).float().cuda()
 
                 # Pass the batch through the generator
-                reconsts = G(z_pred, labels)
+                reconsts = torch.tanh(G(z_pred, labels))
 
                 # Pass the images through the discriminator
                 fake_score = D(reconsts, labels)
@@ -141,9 +158,7 @@ def search(**kwargs):
                     optim_d.step()
 
                     optim_e.zero_grad()  
-                    optim_d.zero_grad()  
-
-                    scheduler_e.step( (epoch + i)/iters_per_epoch)        
+                    optim_d.zero_grad()      
             
             iters += 1
 
@@ -151,11 +166,12 @@ def search(**kwargs):
         print(f"Running loss of the encoder at epoch {epoch + 1}: {running_loss_e/ iters_per_epoch}")
 
         writer.add_scalar('Loss/discriminator', running_loss_d/ iters_per_epoch, epoch + 1)
-        writer.add_scalar('Loss/encoder', running_loss_d/ iters_per_epoch, epoch + 1)
+        writer.add_scalar('Loss/encoder', running_loss_e/ iters_per_epoch, epoch + 1)
         writer.add_scalar('LR/encoder', scheduler_e.get_last_lr()[0], epoch + 1)
         writer.add_image('Image/real', make_grid(imgs, normalize=True), epoch + 1)
         writer.add_image('Image/reconstruction', make_grid(reconsts, normalize=True), epoch + 1)
 
+        scheduler_e.step()   
 
         # TODO: Save the discriminator and encoder
 
