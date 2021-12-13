@@ -11,6 +11,7 @@ import math
 # Resolutions allowed.
 _RESOLUTIONS_ALLOWED = [8, 16, 32, 64, 128, 256, 512, 1024]
 
+
 class FastGANEncoder(nn.Module):
     """The encoder takes images with `RGB` color channels and range [-1, 1]
   as inputs, and encode the input images to z space of the GAN.
@@ -18,7 +19,7 @@ class FastGANEncoder(nn.Module):
 
     def __init__(
         self,
-        resolution,
+        resolution=256,
         z_space_dim=256,
         num_blocks=3,
         image_channels=3,
@@ -27,7 +28,7 @@ class FastGANEncoder(nn.Module):
     ):
         """Initializes the encoder with basic settings.
     Args:
-      resolution: The resolution of the input image.
+      resolution: The resolution of the input image. (default: 256)
       z_space_dim: The dimension of the disentangled latent vector z.
         (default: 256)
       num_blocks: Number of convolutional blocks to be used. (default: 3, min: 3)
@@ -47,7 +48,7 @@ class FastGANEncoder(nn.Module):
                 f"Invalid resolution: {resolution}!\n"
                 f"Resolutions allowed: {_RESOLUTIONS_ALLOWED}."
             )
-        if num_blocks < 3 or num_blocks > int(math.log2(resolution // 8 )) + 2:
+        if num_blocks < 3 or num_blocks > int(math.log2(resolution // 8)) + 2:
             raise ValueError(
                 f"Invalid number of blocks: {num_blocks}!\n"
                 f"Number of blocks must be greater than or equal to 3 and less than or equal to {int(math.log2(resolution // 8 )) + 2}."
@@ -67,28 +68,19 @@ class FastGANEncoder(nn.Module):
         for block_idx in range(self.num_blocks):
             if block_idx == 0:
                 blocks.append(
-                    FirstBlock(
-                        in_channels=in_channels,
-                        out_channels=out_channels,
-                    )
+                    FirstBlock(in_channels=in_channels, out_channels=out_channels,)
                 )
                 blocks.append(nn.AvgPool2d(2, 2))
 
             elif block_idx == self.num_blocks - 1:
                 # out_channels = self.z_space_dim * 2 * block_idx
                 blocks.append(
-                    Head(
-                        in_channels=in_channels,
-                        out_channels=self.z_space_dim,
-                    )
+                    Head(in_channels=in_channels, out_channels=self.z_space_dim,)
                 )
 
             else:
                 blocks.append(
-                    ResBlock(
-                        in_channels=in_channels,
-                        out_channels=out_channels,
-                    )
+                    ResBlock(in_channels=in_channels, out_channels=out_channels,)
                 )
                 blocks.append(nn.AvgPool2d(2, 2))
             in_channels = out_channels
@@ -140,13 +132,12 @@ class BatchNormLayer(nn.Module):
     def forward(self, x):
         return self.bn(x)
 
+
 class FirstBlock(nn.Module):
     """Implements the first block, which is a convolutional block."""
 
     def __init__(
-        self,
-        in_channels,
-        out_channels,
+        self, in_channels, out_channels,
     ):
         super().__init__()
 
@@ -159,7 +150,7 @@ class FirstBlock(nn.Module):
             bias=False,
         )
         self.bn = BatchNormLayer(channels=out_channels)
-        
+
         self.activate = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
     def forward(self, x):
@@ -173,9 +164,7 @@ class ResBlock(nn.Module):
   """
 
     def __init__(
-        self,
-        in_channels,
-        out_channels,
+        self, in_channels, out_channels,
     ):
         """Initializes the class with block settings.
     Args:
