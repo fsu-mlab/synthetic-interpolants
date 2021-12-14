@@ -15,8 +15,8 @@ from torchvision.datasets import DatasetFolder
 import torchvision.transforms as transforms
 from torchvision.utils import make_grid
 
-from model import FastGANEncoder
-from loss import EncoderLoss
+from model import Inverter
+from loss import InversionLoss
 
 import os
 import click
@@ -96,7 +96,7 @@ def search(**kwargs):
 
     iters_per_epoch = len(dataloader)
 
-    encoder_loss = EncoderLoss()
+    inversion_loss = InversionLoss()
 
     # Load Generator in evaluation mode
     with dnnlib.util.open_url(opts['pkl']) as f:
@@ -107,20 +107,20 @@ def search(**kwargs):
         D = legacy.load_network_pkl(f)['D'].to(device)
     D.train()
 
-    E = FastGANEncoder()
-    E.to(device)
-    E.train()
+    I = Interpolator()
+    I.to(device)
+    I.train()
 
     # Initialize optimizers
     optim_d = AdamW(D.parameters())
-    optim_e = AdamW(E.parameters(), lr=0.01)
-    scheduler_e = CosineAnnealingWarmRestarts(optim_e, 10)
+    optim_i = AdamW(I.parameters(), lr=0.01)
+    scheduler_i = CosineAnnealingWarmRestarts(optim_i, 10)
 
     print(f"\nTraining for {opts['epochs']} epochs with batch size {str(opts['batch_gpu']) + ' and total batch ' + str(opts['batch']) if opts.get('batch_gpu') else int(opts['batch'])} on {num_classes} classes...\n")
 
     for epoch in range(opts['epochs']):
         running_loss_d = 0.
-        running_loss_e = 0.
+        running_loss_i = 0.
 
         # Iterate over dataset 
         iters = 0
@@ -131,7 +131,7 @@ def search(**kwargs):
                 imgs = imgs.cuda()
 
                 # Encode the batch
-                z_pred = E(imgs)
+                z_pred = I(imgs)
                 labels = F.one_hot(torch.tensor(labels), num_classes).float().cuda()
 
                 # Pass the batch through the generator
@@ -142,36 +142,36 @@ def search(**kwargs):
                 real_score = D(imgs, labels)
 
                 # Calculate the loss 
-                loss_e = encoder_loss(imgs, reconsts, fake_score)
+                loss_i = inversion_loss(imgs, reconsts, fake_score)
                 loss_d = fake_score.mean() - real_score.mean()
 
-                running_loss_e += loss_e.item()
+                running_loss_i += loss_i.item()
                 running_loss_d += loss_d.item()
 
                 # Determine whether or not to back prop
                 if (iters + 1) % accumulate_steps == 0:
                     iters = 0
-                    loss_e.backward(retain_graph=True)
+                    loss_i.backward(retain_graph=True)
                     loss_d.backward()
 
-                    optim_e.step()
+                    optim_i.step()
                     optim_d.step()
 
-                    optim_e.zero_grad()  
+                    optim_i.zero_grad()  
                     optim_d.zero_grad()      
             
             iters += 1
 
         print(f"Running loss of the discriminator at epoch {epoch + 1}: {running_loss_d/ iters_per_epoch}")
-        print(f"Running loss of the encoder at epoch {epoch + 1}: {running_loss_e/ iters_per_epoch}")
+        print(f"Running loss of the inverter at epoch {epoch + 1}: {running_loss_i/ iters_per_epoch}")
 
         writer.add_scalar('Loss/discriminator', running_loss_d/ iters_per_epoch, epoch + 1)
-        writer.add_scalar('Loss/encoder', running_loss_e/ iters_per_epoch, epoch + 1)
-        writer.add_scalar('LR/encoder', scheduler_e.get_last_lr()[0], epoch + 1)
+        writer.add_scalar('Loss/inverter', running_loss_i/ iters_per_epoch, epoch + 1)
+        writer.add_scalar('LR/inverter', scheduler_i.get_last_lr()[0], epoch + 1)
         writer.add_image('Image/real', make_grid(imgs, normalize=True), epoch + 1)
         writer.add_image('Image/reconstruction', make_grid(reconsts, normalize=True), epoch + 1)
 
-        scheduler_e.step()   
+        scheduler_i.step()   
 
         # TODO: Save the discriminator and encoder
 

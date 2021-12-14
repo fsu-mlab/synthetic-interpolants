@@ -9,10 +9,10 @@ from lpips import LPIPS
 from torch.autograd import grad
 
 
-class EncoderLoss(nn.Module):
-    """Encoder loss for inversion"""
+class InversionLoss(nn.Module):
+    """Inversion loss function, including a reconstruction loss and perceptual loss"""
 
-    def __init__(self, net: str = "alex"):
+    def __init__(self, reconstruction: str = "l1", perceptual: str = "alex"):
         """
         Args:
             net: String representing the network to use for LPIPS loss (default: alex)
@@ -21,14 +21,19 @@ class EncoderLoss(nn.Module):
         self.lpips = LPIPS(net=net).cuda()
         self.lpips.eval()
 
-        # Lambda values from the paper
+        # Weights for the loss
         self.lmbda_adv = 1.
         self.lmbda_lpips = 1.
+
+        # Determine what reconstruction loss to use 
+        self.rec_loss = nn.L1Loss() if reconstruction == "l1" else nn.MSELoss()
+        
+
 
     def forward(self, inpt: torch.Tensor, target: torch.Tensor, disc: torch.Tensor):
         # Disc represents the discriminator loss
         return (
-            F.l1_loss(inpt, target)
+            self.rec_loss(inpt, target)
             + self.lmbda_lpips * self.lpips(inpt, target).mean()
             - self.lmbda_adv * disc.mean()
         )
