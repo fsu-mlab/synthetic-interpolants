@@ -15,10 +15,11 @@ class InversionLoss(nn.Module):
     def __init__(self, reconstruction: str = "l1", perceptual: str = "alex"):
         """
         Args:
-            net: String representing the network to use for LPIPS loss (default: alex)
+            reconstruction (str): Either l1 or l2 reconstruction loss
+            net (str): String representing the network to use for LPIPS loss (default: alex)
         """
         super().__init__()
-        self.lpips = LPIPS(net=net).cuda()
+        self.lpips = LPIPS(net=perceptual).cuda()
         self.lpips.eval()
 
         # Weights for the loss

@@ -57,6 +57,8 @@ class Dataset(DatasetFolder):
 
 
 def search(**kwargs):
+    torch.backends.cudnn.benchmark = True
+
     device = torch.device('cuda')
     opts = dnnlib.EasyDict(kwargs) # Command line arguments.
 
@@ -100,16 +102,23 @@ def search(**kwargs):
 
     # Load Generator in evaluation mode
     with dnnlib.util.open_url(opts['pkl']) as f:
-        G = legacy.load_network_pkl(f)['G_ema'].to(device)
+        G = legacy.load_network_pkl(f)['G_ema'].synthesis
+        G.to(device)
     G.eval()
+    print("Generator network: ")
+    print(G)
 
     with dnnlib.util.open_url(opts['pkl']) as f:
         D = legacy.load_network_pkl(f)['D'].to(device)
     D.train()
+    print("Discriminator network: ")
+    print(D)
 
-    I = Interpolator()
+    I = Inverter(7, 4, 3, G.w_dim)
     I.to(device)
     I.train()
+    print("Inversion network: ")
+    print(I)
 
     # Initialize optimizers
     optim_d = AdamW(D.parameters())
@@ -131,11 +140,13 @@ def search(**kwargs):
                 imgs = imgs.cuda()
 
                 # Encode the batch
-                z_pred = I(imgs)
+                w_pred = I(imgs)
                 labels = F.one_hot(torch.tensor(labels), num_classes).float().cuda()
 
-                # Pass the batch through the generator
-                reconsts = torch.tanh(G(z_pred, labels))
+            # Pass the batch through the generator
+            reconsts = torch.tanh(G(w_pred)) 
+
+            with autocast():
 
                 # Pass the images through the discriminator
                 fake_score = D(reconsts, labels)
@@ -157,8 +168,8 @@ def search(**kwargs):
                     optim_i.step()
                     optim_d.step()
 
-                    optim_i.zero_grad()  
-                    optim_d.zero_grad()      
+                    optim_i.zero_grad(set_to_none=True)  
+                    optim_d.zero_grad(set_to_none=True)      
             
             iters += 1
 
